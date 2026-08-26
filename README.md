@@ -1,5 +1,5 @@
 # Bioconvection
-This repository contains the baseline code for the simulations and necessary data to reproduce figures 3- 4.
+This repository contains the baseline code for the simulations and necessary data to reproduce figures 3- 4. Files **1920.vtk are the final state files for T = 2400 s with pr = 25 (output frequency every pr steps).
 
 # Contents of this repo:
 ```
