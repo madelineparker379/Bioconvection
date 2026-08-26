@@ -1,0 +1,374 @@
+//load "iovtk"
+
+macro cdot(ax,ay,bx,by) (ax*bx+ay*by)//
+macro div(ax,ay) (dx(ax)+dy(ay))//
+macro sym(u1,u2,v1,v2) ( dx(u1)*dx(v1) +0.5*(dx(u2)+dy(u1))*(dx(v2)+dy(v1)) + dy(u2)*dy(v2))//
+
+verbosity = 0;
+
+include "SaveVTK2d.edp";
+
+/* reloading mesh */ 
+bool   RESTART = false;               // set true when continuing a run
+string SaveMeshFile  = "meshTfin2400.msh";    // saving mesh
+string SaveStateFile = "stateTfin2400.txt";   // saving state
+
+string LoadMeshFile  = "meshTfin1.msh";    // loading previous mesh
+string LoadStateFile = "stateTfin1.txt";   // loading previous state
+
+string where="./"; 
+
+SaveMeshFile = where + SaveMeshFile;
+SaveStateFile = where + SaveStateFile;
+
+LoadMeshFile = where + LoadMeshFile;
+LoadStateFile = where + LoadStateFile;
+
+int n=40; 
+int L = 16;
+int H = 2;
+
+/* relaoding mesh */
+mesh Th;
+if (RESTART) Th = readmesh(LoadMeshFile);
+else Th = square(n, 8*n, [L*x, H*y], flags=1);
+
+//plot(Th, wait=1);
+
+
+// FE SPACES
+fespace Fh(Th,P1b);
+fespace Ph(Th,P1);
+Fh vx, ux, uxold, uxolder, uxolder2, ukxold, ukx, ukxolder, uAB2x, LTEux, Rux;
+Fh vy, uy, uyold, uyolder, uyolder2, ukyold, uky, ukyolder, uAB2y, LTEuy, Ruy;
+
+//Ph ck, ckold, ckolder, s, c, cold, colder, c0;
+Ph p, q, pold, pk, pkold, pkolder, polder, polder2, pplot, nu, cproj;
+
+ //use for theta = 0.5
+fespace Rh(Th,P1);
+Rh ck, ckold, ckolder, s, c, cold, colder, colder2, c0, cAB2, LTEc, Rc;
+
+
+//for plotting
+fespace PlotFh(Th,[P1,P1]);
+PlotFh [plotux,plotuy];
+
+//parameters
+real g=980.665;
+real gamma=5e-10;
+real U=0.1;
+real omega=0.01;
+real nu0=1e-2;
+real cmax=5e+6, relconc; 
+
+// time and timestep
+real TT=1.0, t;
+real Tmore = 2.0; 
+real dt=5e-2;
+real NN=TT/dt;
+int br, pr=2;
+
+real totalmassOverVol = 0;
+real totalmassIntegral;
+
+real epsilon=0;  //-1e-8; //-1e-10;
+
+real tol=1e-4;
+
+real dtnew=dt;
+real tolnew=tol, tolM=tol;
+real tau=dt, tauold=dt, tauolder=dt, tolDt=0.0001; 
+real theta = 0.5; 
+real thetaold=theta, thetaolder=theta; 
+
+real rmin=0.5, rmax=1.2, safety=0.95; 
+
+real PE, KE;
+real Area, Urms;
+real ctop, cbot, deltaC;
+real epsC = 1e-30;
+real Re, Sc, PeFlow, PeSwim, Gr, Ra, wthetaAvg, Nueff;
+
+real C0, C1, aLS, bLS;
+
+real errC, errU, errP;
+
+real a,b,cc;
+real That, avg;
+real NormLTEu, NormLTEc;
+
+
+int cnt, nit;
+int totalcnt=0;
+int nucount =0;
+int k=0;
+
+fespace Pwc(Th,P0);
+Pwc hhhh=hTriangle;
+real hmin=hhhh[].min;
+
+real stab=0; //1e-3;
+
+
+// Fluid problem
+problem FluidBE([ukx,uky,pk],[vx,vy,q]) =
+int2d(Th)(1.0/(theta*tau)*cdot(ukx,uky,vx,vy))
+-int2d(Th)(1.0/(theta*tau)*cdot(uxold,uyold,vx,vy))
++int2d(Th)((ukxold*dx(ukx)+ukyold*dy(ukx))*vx)
++int2d(Th)((ukxold*dx(uky)+ukyold*dy(uky))*vy)
++int2d(Th)(nu*sym(ukx,uky,vx,vy))
+-int2d(Th)(pk*div(vx,vy))
++int2d(Th)(q*div(ukx,uky))
++int2d(Th)(g*(1.0+gamma*ckold)*vy)
+//+int1d(Th,3)(2.0*nu*dy(ukx)*vx)
+//+int2d(Th)(stab*hTriangle*hTriangle*(dx(pk)*dx(q)+dy(pk)*dy(q)))
++on(2,4,1,3, uky=0)
++on(2,4,1, ukx=0);
+
+problem TransportBE(ck,s) =
+int2d(Th)(1.0/(theta*tau)*ck*s)
+-int2d(Th)(1.0/(theta*tau)*cold*s)
++int2d(Th)(omega*(dx(ck)*dx(s)+dy(ck)*dy(s)))
++int2d(Th)((dx(ck)*ukxold+dy(ck)*ukyold)*s)
+-int2d(Th)(U*ck*dy(s));
+
+if (!RESTART){ 
+	// new state: RESTART = false
+	cproj=1e+5+epsilon;
+	c0=cproj;
+	nu=nu0;
+
+	uxolder=0;
+	uyolder=0;
+	polder=0;
+	colder=c0;
+
+	uxold=0;
+	uyold=0;
+	pold=0;
+	cold=c0;
+
+	br=1;
+	nit=0;
+}
+else { 
+    // load saved state: RESTART = true
+    ifstream fin(LoadStateFile);
+
+    // time & scheme scalars
+    fin >> t;
+    fin >> tau >> tauold >> tauolder;
+    fin >> theta >> thetaold >> thetaolder;
+    fin >> br >> nit;
+
+    // current fields
+    fin >> ux[] >> uy[] >> p[] >> c[];
+
+    // 1-step history
+    fin >> uxold[] >> uyold[] >> pold[] >> cold[];
+
+    // 2-step history
+    fin >> uxolder[] >> uyolder[] >> polder[] >> colder[];
+
+    // prime the variables used inside BE problems
+    ukx = ux;  uky = uy;  pk = p;  ck = c;
+    ukxold = uxold;  ukyold = uyold;  pkold = pold;  ckold = cold;
+    ukxolder = uxolder;  ukyolder = uyolder;  pkolder = polder;  ckolder = colder;
+
+    // keep next step consistent with last used step
+    dtnew = tau;
+
+    cout << "Restarted from t=" << t << ", nit=" << nit << ", br=" << br << endl;
+
+    TT = t + Tmore;
+}
+
+
+ofstream report2(where+"energy.txt",append);
+ofstream reportnd(where+"nondim.txt",append);
+
+Area = int2d(Th)(1.0);
+
+/* Nusselt Number Geometry calculations independent of domain */
+// Gravity direction (unit). If gravity is vertical, keep (0,1).
+real gx = 0.0, gy = 1.0;
+real gnorm = sqrt(gx*gx + gy*gy);  gx/=gnorm;  gy/=gnorm;
+
+// Gravity-aligned coordinate s = ĝ·(x,y)
+Rh sCoord = gx*x + gy*y;
+
+// Effective height along gravity (geometry-agnostic)
+real sMin = sCoord[].min, sMax = sCoord[].max;
+real Heff = sMax - sMin;
+
+// Precompute geometry-only LS matrix for c_lin(s)=a+b s
+real S1 = int2d(Th)( sCoord );
+real S2 = int2d(Th)( sCoord*sCoord );
+real detA = Area*S2 - S1*S1;
+if (abs(detA) < 1e-14) detA = (detA>=0 ? 1e-14 : -1e-14); // safeguard from det =0
+
+// Inverse of [[Area, S1],[S1, S2]]
+real inv11 =  S2/detA, inv12 = -S1/detA;
+real inv21 = -S1/detA, inv22 =  Area/detA;
+
+
+while(t<TT) 
+{
+	k++;
+
+	if (nit == 0){ 
+		// print header in energy file
+		report2 << "time" << "\t\t" << "totalmass" << "\t\t\t" <<"KE"  << "\t\t\t" <<"PE" << endl;
+		// print header in nondim (nd) file
+		reportnd << "time" << "\t\t" << "Urms" << "\t\t\t" << "Re" << "\t\t\t" << "Sc" << "\t\t" << "PeFlow" << "\t\t\t" << "PeSwim" << "\t\t" << "Gr" << "\t\t" << "Ra" << "\t\t" << "Nu_eff" << "\t\t\t" << "deltaC" << endl;
+
+	}
+	nit++;
+
+	tau=dtnew;
+	tol=tolnew;
+
+	cnt = 0;
+
+	ukx=(1+theta*tau/tauold)*uxold - theta*tau/tauold*uxolder; 
+	uky=(1+theta*tau/tauold)*uyold - theta*tau/tauold*uyolder; 
+	pk=(1+theta*tau+tauold-thetaolder*tauolder)/(1+thetaold*tauold-	thetaolder*tauolder)*pold - ((1-thetaold)*tauold+theta*tau)/(1+thetaold*tauold-thetaolder*tauolder)*polder;
+	ck=(1+theta*tau/tauold)*cold - theta*tau/tauold*colder;
+
+	while (true){
+
+		cnt++;
+
+		ckold=ck;
+		pkold=pk;
+		ukxold=ukx;
+		ukyold=uky;
+
+		FluidBE;
+		TransportBE;
+
+		errC=int2d(Th)((ck-ckold)^2)/int2d(Th)(ck^2);
+		errU=int2d(Th)((ukx-ukxold)^2+(uky-ukyold)^2)/int2d(Th)(ukx^2+uky^2);
+		errP=int2d(Th)((pk-pkold)^2)/int2d(Th)(pk^2);
+
+	cout << "subIter #" << cnt << " t" << t << "\t errU = " << errU << "\t errC = " << errC << "\t errP = " << errP << "\t total mass = " << totalmassOverVol  <<endl;
+
+		if (errC < tol && errU < tol )  break;  // && errP < tol
+	}
+	avg = avg+cnt;
+
+	totalcnt = cnt + totalcnt; //sum number of subiterations
+
+	ux = 1/theta*ukx - (1-theta)/theta*uxold;
+	uy = 1/theta*uky - (1-theta)/theta*uyold;
+
+	p=pk;
+
+	c = 1/theta*ck - (1-theta)/theta*cold;
+	
+	k=0;
+	t=t+tau;
+	
+	totalmassIntegral =int2d(Th)(c)/int2d(Th)(1.0);
+	KE=0.5*int2d(Th)(ux^2+uy^2);
+	PE=gamma*g*int2d(Th)(c*(y));
+
+	report2 << t << "\t\t" << totalmassIntegral << "\t\t\t" <<KE  << "\t\t\t" <<PE << endl;
+
+	// characteristic speed from KE
+	Urms = sqrt((2.0*KE)/Area);
+
+	// Least-squares baseline c_lin(s) = a + b s (rhs depends on c only)
+	C0 = int2d(Th)(c);
+	C1 = int2d(Th)(sCoord*c);
+	aLS = inv11*C0 + inv12*C1;
+	bLS = inv21*C0 + inv22*C1;
+
+	// Use an effective deltaC along gravity (geometry independent)
+	deltaC = bLS * Heff;  
+
+	// --- Fluctuation θ and gravity-aligned velocity v_g
+	Rh thetaC = c - (aLS + bLS*sCoord);
+	wthetaAvg = (1.0/Area) * int2d(Th)((gx*ux + gy*uy)*thetaC);
+
+	// --- Effective Nusselt for a closed box (geeometry independent)
+	Nueff = 1.0 + (Heff/(omega*(abs(deltaC) + epsC))) * wthetaAvg;
+
+	// --- Dimensionless groups using Heff and constants omega, nu0, U
+	Re = Urms*Heff/nu0;
+	Sc = nu0/omega;
+	PeFlow = Urms*Heff/omega;
+	PeSwim = U*Heff/omega;
+	Gr = g*gamma*abs(deltaC)*pow(Heff,3)/(nu0*nu0);
+	Ra = Gr*Sc;
+
+	reportnd << t << "\t\t" << Urms << "\t\t" << Re << "\t\t" << Sc << "\t\t" << PeFlow << "\t\t" << PeSwim << "\t\t" << Gr << "\t\t" << Ra << "\t\t" << Nueff << "\t\t" << deltaC << endl;
+
+	//report2 << t << "\t\t" << totalmassIntegral << "\t\t\t" <<KE  << "\t\t\t" <<PE << timeDerU << "\t\t\t"<< timeDerC << endl;
+	//report11 <<t<< "    "<< k << "    "<< timeDerU << "    "<< timeDerC <<"    "<< stop << endl; //avgRejTr.txt
+
+	thetaolder=thetaold;
+	thetaold=theta;
+	tauolder=tauold;
+	tauold=tau;
+
+	colder2=colder;
+	colder=cold;
+	cold=c;
+
+	polder2=polder;
+	uxolder2=uxolder;
+	uyolder2=uyolder;
+
+	polder=pold;
+	uxolder=uxold;
+	uyolder=uyold;
+
+	pold=p;
+	uxold=ux;
+	uyold=uy;
+
+	if(nit%pr==0){
+		[plotux,plotuy]=[ux,uy];
+		postproc2D(p[],plotux[],Th,where+"fluid"+string(br)+".vtk");
+
+		[plotux,plotuy]=[ux,uy];
+		cproj=c;
+		postproc2D(cproj[],plotux[],Th,where+"conc"+string(br)+".vtk");
+
+		br=br+1;
+	}
+}
+avg = avg/nit; 
+real avgdt = t/nit;
+ofstream report12(where+"avg.txt",append);
+report12 << t<<"     "<< avg << "     "<< avgdt <<endl;
+
+
+/* save mesh and state data to reload */
+savemesh(Th, SaveMeshFile);
+
+ofstream fout(SaveStateFile);
+fout.precision(16);    // formatting
+
+
+// time & scheme scalars
+fout << t << "\n"
+     << tau      << "\n" << tauold   << "\n" << tauolder   << "\n"
+     << theta    << "\n" << thetaold << "\n" << thetaolder << "\n"
+     << br       << "\n" << nit      << "\n";
+
+// current fields
+fout << ux[] << "\n" << uy[] << "\n" << p[] << "\n" << c[] << "\n";
+
+// 1-step history
+fout << uxold[] << "\n" << uyold[] << "\n" << pold[] << "\n" << cold[] << "\n";
+
+// 2-step history
+fout << uxolder[] << "\n" << uyolder[] << "\n" << polder[] << "\n" << colder[] << "\n";
+
+//fout.close(); 
+
+cout << "Saved mesh to " << SaveMeshFile  << endl;
+cout << "Saved state to " << SaveStateFile << endl;
