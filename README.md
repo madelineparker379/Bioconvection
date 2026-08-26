@@ -4,7 +4,7 @@ This repository contains the baseline code for the simulations and necessary dat
 # Contents of this repo:
 ```
 .
-├── Figure Scripts/
+├── FigureScripts/
 │   ├── BE_figTools/
 │   ├── Figure_AspectEnergy.m
 │   ├── Figure_VortexAspect.m
@@ -133,7 +133,7 @@ meshTfin2400.msh, stateTfin2400.txt — mesh + state checkpoint for restart.
 
 
 # Figure Reproduction
-Code for figures 3 and 4 are produced using MATALB given in /Figure Scripts. Data is provided with in the file or in /data.
+Code for figures 3 and 4 are produced using MATALB given in /FigureScripts. Data is provided with in the file or in /data.
 ### Figure 3:
 Figure_VortexAspect.m, relies on bestPolyOrder.m and BE_figTools/
 ### Figure 4: 
